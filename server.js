@@ -11,6 +11,13 @@ const DISCORD_PING = 1;
 const APPLICATION_COMMAND = 2;
 const CHANNEL_MESSAGE_WITH_SOURCE = 4;
 
+/* Temp */
+app.post("/test", (req, res) => {
+  console.log("POST /test received");
+  res.send("POST test OK");
+});
+/* End Temp */
+
 app.post("/interactions", async (req, res) => {
   console.log("POST /interactions received");
 
