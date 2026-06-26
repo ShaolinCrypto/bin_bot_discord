@@ -11,9 +11,16 @@ const DISCORD_PING = 1;
 const APPLICATION_COMMAND = 2;
 const CHANNEL_MESSAGE_WITH_SOURCE = 4;
 
-app.post("/", async (req, res) => {
+app.post("/interactions", async (req, res) => {
+  console.log("POST /interactions received");
+
   const signature = req.header("x-signature-ed25519");
   const timestamp = req.header("x-signature-timestamp");
+
+  if (!signature || !timestamp) {
+    console.log("Missing Discord signature headers");
+    return res.status(401).send("Missing signature headers");
+  }
 
   const isVerified = nacl.sign.detached.verify(
     Buffer.from(timestamp + req.body.toString("utf8")),
