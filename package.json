@@ -1,0 +1,14 @@
+{
+  "name": "leeds-bins-discord-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "register": "node register-command.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "tweetnacl": "^1.0.3"
+  }
+}
