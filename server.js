@@ -51,6 +51,46 @@ app.get("/", (_, res) => {
   res.send("Leeds bins Discord bot is running.");
 });
 
+async function registerCommands() {
+  const appId = process.env.DISCORD_APPLICATION_ID;
+  const botToken = process.env.DISCORD_BOT_TOKEN;
+  const guildId = process.env.DISCORD_GUILD_ID;
+
+  if (!appId || !botToken) {
+    console.log("Skipping command registration: missing app ID or bot token.");
+    return;
+  }
+
+  const command = {
+    name: "bins",
+    description: "Show upcoming Leeds bin collection dates"
+  };
+
+  const url = guildId
+    ? `https://discord.com/api/v10/applications/${appId}/guilds/${guildId}/commands`
+    : `https://discord.com/api/v10/applications/${appId}/commands`;
+
+  const response = await fetch(url, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bot ${botToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify([command])
+  });
+
+  const text = await response.text();
+
+  if (!response.ok) {
+    console.error("Command registration failed:", response.status, text);
+    return;
+  }
+
+  console.log("Command registration complete:", response.status, text);
+}
+
+await registerCommands();
+
 app.listen(PORT, () => {
   console.log(`Listening on port ${PORT}`);
 });
