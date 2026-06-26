@@ -5,6 +5,11 @@ const app = express();
 
 app.use(express.raw({ type: "*/*" }));
 
+app.use((req, res, next) => {
+  console.log("REQUEST:", req.method, req.originalUrl);
+  next();
+});
+
 const PORT = process.env.PORT || 8080;
 
 const DISCORD_PING = 1;
