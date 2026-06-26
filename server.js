@@ -16,12 +16,10 @@ const DISCORD_PING = 1;
 const APPLICATION_COMMAND = 2;
 const CHANNEL_MESSAGE_WITH_SOURCE = 4;
 
-/* Temp */
 app.post("/test", (req, res) => {
   console.log("POST /test received");
   res.send("POST test OK");
 });
-/* End Temp */
 
 app.post("/interactions", async (req, res) => {
   console.log("POST /interactions received");
@@ -41,13 +39,30 @@ app.post("/interactions", async (req, res) => {
   );
 
   if (!isVerified) {
+    console.log("Signature verification failed");
     return res.status(401).send("Invalid request signature");
   }
+
+  console.log("Signature verified");
 
   const interaction = JSON.parse(req.body.toString("utf8"));
 
   if (interaction.type === DISCORD_PING) {
     return res.json({ type: 1 });
+  }
+
+  if (
+    interaction.type === APPLICATION_COMMAND &&
+    interaction.data?.name === "binping"
+  ) {
+    console.log("binping command received");
+
+    return res.json({
+      type: CHANNEL_MESSAGE_WITH_SOURCE,
+      data: {
+        content: "✅ Discord interaction received!"
+      }
+    });
   }
 
   if (
@@ -83,10 +98,18 @@ async function registerCommands() {
     return;
   }
 
-  const command = {
-    name: "bins",
-    description: "Show upcoming Leeds bin collection dates"
-  };
+  console.log("Registering", guildId ? "guild" : "global", "commands");
+
+  const commands = [
+    {
+      name: "bins",
+      description: "Show upcoming Leeds bin collection dates"
+    },
+    {
+      name: "binping",
+      description: "Test the Discord interaction endpoint"
+    }
+  ];
 
   const url = guildId
     ? `https://discord.com/api/v10/applications/${appId}/guilds/${guildId}/commands`
@@ -98,7 +121,7 @@ async function registerCommands() {
       Authorization: `Bot ${botToken}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify([command])
+    body: JSON.stringify(commands)
   });
 
   const text = await response.text();
@@ -111,11 +134,13 @@ async function registerCommands() {
   console.log("Command registration complete:", response.status, text);
 }
 
-await registerCommands();
-
-app.listen(PORT, () => {
-  console.log(`Listening on port ${PORT}`);
-});
+registerCommands()
+  .catch(err => console.error("Command registration crashed:", err))
+  .finally(() => {
+    app.listen(PORT, () => {
+      console.log(`Listening on port ${PORT}`);
+    });
+  });
 
 async function getBinsEmbed() {
   const startDate = new Date().toISOString().slice(0, 10);
@@ -129,7 +154,11 @@ async function getBinsEmbed() {
     `&startDate=${startDate}` +
     `&endDate=${endDate}`;
 
+  console.log("Fetching Leeds bins API");
+
   const response = await fetch(url);
+
+  console.log("Leeds API status:", response.status);
 
   if (!response.ok) {
     return {
@@ -148,11 +177,13 @@ async function getBinsEmbed() {
     return {
       type: CHANNEL_MESSAGE_WITH_SOURCE,
       data: {
-        embeds: [{
-          title: "🗑️ Bin collections",
-          description: "No upcoming collections found.",
-          color: 0xffcc00
-        }]
+        embeds: [
+          {
+            title: "🗑️ Bin collections",
+            description: "No upcoming collections found.",
+            color: 0xffcc00
+          }
+        ]
       }
     };
   }
@@ -163,20 +194,22 @@ async function getBinsEmbed() {
   return {
     type: CHANNEL_MESSAGE_WITH_SOURCE,
     data: {
-      embeds: [{
-        title: "🗑️ Upcoming bin collections",
-        description: `Next collection: **${next.type}** on **${formatDate(next.date)}**`,
-        color: colourForBin(next.type),
-        fields: upcoming.map(item => ({
-          name: item.type,
-          value: formatDate(item.date),
-          inline: true
-        })),
-        footer: {
-          text: "Leeds City Council"
-        },
-        timestamp: new Date().toISOString()
-      }]
+      embeds: [
+        {
+          title: "🗑️ Upcoming bin collections",
+          description: `Next collection: **${next.type}** on **${formatDate(next.date)}**`,
+          color: colourForBin(next.type),
+          fields: upcoming.map(item => ({
+            name: item.type,
+            value: formatDate(item.date),
+            inline: true
+          })),
+          footer: {
+            text: "Leeds City Council"
+          },
+          timestamp: new Date().toISOString()
+        }
+      ]
     }
   };
 }
