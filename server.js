@@ -35,7 +35,10 @@ app.post("/", async (req, res) => {
     interaction.type === APPLICATION_COMMAND &&
     interaction.data?.name === "bins"
   ) {
-    return res.json(await getBinsEmbed());
+    console.log("Bins command received");
+    const payload = await getBinsEmbed();
+    console.log("Bins payload ready");
+    return res.json(payload);
   }
 
   return res.json({
