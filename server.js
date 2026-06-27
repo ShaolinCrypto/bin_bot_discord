@@ -39,8 +39,7 @@ let startupStatus = {
   discordApplication: null,
   botIdentity: null,
   applicationId: null,
-  interactionsEndpoint: null,
-  guildCommandPermissions: null
+  interactionsEndpoint: null
 };
 
 const interactionStats = {
@@ -423,7 +422,6 @@ app.get("/health", (_, res) => {
       DISCORD_PUBLIC_KEY: Boolean(env("DISCORD_PUBLIC_KEY")),
       DISCORD_APPLICATION_ID: Boolean(env("DISCORD_APPLICATION_ID")),
       DISCORD_BOT_TOKEN: Boolean(env("DISCORD_BOT_TOKEN")),
-      DISCORD_GUILD_ID: Boolean(env("DISCORD_GUILD_ID")),
       PREMISES_ID: Boolean(env("PREMISES_ID") || env("UPRN")),
       PUBLIC_URL: Boolean(env("PUBLIC_URL")),
       INTERACTIONS_ENDPOINT_URL: Boolean(env("INTERACTIONS_ENDPOINT_URL"))
@@ -439,16 +437,14 @@ app.get("/health", (_, res) => {
     configuredInteractionsEndpoint: configuredEndpoint,
     interactionStats,
     commandRegistration: startupStatus.commandRegistration,
-    guildCommandPermissions: startupStatus.guildCommandPermissions,
     inviteUrl: startupStatus.inviteUrl,
     recommendedInteractionsEndpoint:
       getInteractionEndpointUrl() ??
       "https://site--bin-bot-discord--5dyfyjhlp7ws.code.run/interactions",
     notes: [
-      "Channel access is controlled in Discord: Server Settings → Integrations → Count Binface → command permissions.",
-      "Guild command permissions from Discord are shown in guildCommandPermissions (read-only).",
-      "Re-registering commands with changed definitions creates new command IDs and resets integration permissions — configure channels again after deploy if that happens.",
-      "Server admins can bypass integration command restrictions when testing."
+      "Global slash commands can take up to 1 hour to propagate after changes.",
+      "Channel restrictions are configured in Discord under Server Settings → Integrations → Count Binface.",
+      "Remove DISCORD_GUILD_ID from Northflank if it is still set — it is no longer used."
     ]
   });
 });
@@ -547,14 +543,14 @@ async function syncCommands(url, botToken, label) {
   };
 }
 
-async function putCommands(url, botToken) {
+async function putCommands(url, botToken, commandPayload = COMMANDS) {
   const response = await fetch(url, {
     method: "PUT",
     headers: {
       Authorization: `Bot ${botToken}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify(COMMANDS)
+    body: JSON.stringify(commandPayload)
   });
 
   const text = await response.text();
@@ -577,49 +573,8 @@ async function putCommands(url, botToken) {
   };
 }
 
-async function fetchGuildCommandPermissions(appId, guildId, botToken) {
-  const response = await fetch(
-    `https://discord.com/api/v10/applications/${appId}/guilds/${guildId}/commands/permissions`,
-    {
-      headers: {
-        Authorization: `Bot ${botToken}`
-      }
-    }
-  );
-
-  const text = await response.text();
-
-  if (!response.ok) {
-    return {
-      ok: false,
-      status: response.status,
-      error: text
-    };
-  }
-
-  let permissions = [];
-
-  try {
-    const parsed = JSON.parse(text);
-    permissions = Array.isArray(parsed.permissions) ? parsed.permissions : [];
-  } catch {
-    permissions = [];
-  }
-
-  return {
-    ok: true,
-    permissions: permissions.map(permission => ({
-      commandId: permission.application_command_id,
-      targetId: permission.id,
-      type: permission.type === 3 ? "channel" : permission.type === 1 ? "role" : "other",
-      allowed: permission.permission
-    }))
-  };
-}
-
 async function registerCommands() {
   const botToken = env("DISCORD_BOT_TOKEN");
-  const guildId = env("DISCORD_GUILD_ID");
   const appId = startupStatus.applicationId || env("DISCORD_APPLICATION_ID");
 
   startupStatus.inviteUrl = appId
@@ -637,64 +592,25 @@ async function registerCommands() {
     return;
   }
 
-  console.log("Checking slash commands");
+  console.log("Checking global slash commands");
 
-  const results = { ok: true };
+  const globalResult = await syncCommands(
+    `https://discord.com/api/v10/applications/${appId}/commands`,
+    botToken,
+    "Global"
+  );
 
-  if (guildId) {
-    const guildResult = await syncCommands(
-      `https://discord.com/api/v10/applications/${appId}/guilds/${guildId}/commands`,
-      botToken,
-      "Guild"
-    );
+  console.log(
+    "Global commands:",
+    globalResult.skipped ? "unchanged" : globalResult.status,
+    globalResult.commandNames.join(", ") || globalResult.body
+  );
 
-    console.log(
-      "Guild commands:",
-      guildResult.skipped ? "unchanged" : guildResult.status,
-      guildResult.commandNames.join(", ") || guildResult.body
-    );
-
-    results.guild = guildResult;
-    results.ok = guildResult.ok;
-
-    if (!guildResult.ok) {
-      console.error(
-        "Guild command registration failed. Check DISCORD_GUILD_ID matches the server where the bot was invited."
-      );
-    } else {
-      startupStatus.guildCommandPermissions = await fetchGuildCommandPermissions(
-        appId,
-        guildId,
-        botToken
-      );
-      results.guildCommandPermissions = startupStatus.guildCommandPermissions;
-    }
-  } else {
-    const globalResult = await syncCommands(
-      `https://discord.com/api/v10/applications/${appId}/commands`,
-      botToken,
-      "Global"
-    );
-
-    console.log(
-      "Global commands:",
-      globalResult.skipped ? "unchanged" : globalResult.status,
-      globalResult.commandNames.join(", ") || globalResult.body
-    );
-
-    results.global = globalResult;
-    results.ok = globalResult.ok;
-
-    if (!globalResult.ok) {
-      console.error(
-        "Global command registration failed:",
-        globalResult.status,
-        globalResult.body
-      );
-    }
-
-    console.log(
-      "DISCORD_GUILD_ID not set; registered global commands only (may take up to 1 hour to appear)."
+  if (!globalResult.ok) {
+    console.error(
+      "Global command registration failed:",
+      globalResult.status,
+      globalResult.body
     );
   }
 
@@ -702,7 +618,10 @@ async function registerCommands() {
     console.log("Bot invite URL (must include applications.commands):", startupStatus.inviteUrl);
   }
 
-  startupStatus.commandRegistration = results;
+  startupStatus.commandRegistration = {
+    ok: globalResult.ok,
+    global: globalResult
+  };
 }
 
 startupStatus.startedAt = new Date().toISOString();
