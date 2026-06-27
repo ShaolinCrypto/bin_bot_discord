@@ -33,6 +33,8 @@ let startupStatus = {
   commandRegistration: null,
   inviteUrl: null,
   discordApplication: null,
+  botIdentity: null,
+  applicationId: null,
   interactionsEndpoint: null
 };
 
@@ -81,6 +83,33 @@ function recordInteraction(event) {
   if (event.result === "error") interactionStats.errors += 1;
 }
 
+async function fetchBotIdentity(botToken) {
+  const response = await fetch("https://discord.com/api/v10/users/@me", {
+    headers: {
+      Authorization: `Bot ${botToken}`
+    }
+  });
+
+  const text = await response.text();
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      error: text
+    };
+  }
+
+  const bot = JSON.parse(text);
+
+  return {
+    ok: true,
+    id: bot.id,
+    username: bot.username,
+    displayName: bot.global_name ?? bot.username
+  };
+}
+
 async function fetchDiscordApplication(botToken) {
   const response = await fetch("https://discord.com/api/v10/applications/@me", {
     headers: {
@@ -103,8 +132,23 @@ async function fetchDiscordApplication(botToken) {
   return {
     ok: true,
     id: application.id,
+    name: application.name ?? null,
     interactionsEndpointUrl: application.interactions_endpoint_url ?? null
   };
+}
+
+function resolveApplicationId(application) {
+  const configuredId = env("DISCORD_APPLICATION_ID");
+
+  if (configuredId && configuredId !== application.id) {
+    console.error(
+      "DISCORD_APPLICATION_ID does not match the bot token application.",
+      `Env has ${configuredId}, bot token belongs to ${application.id}.`,
+      "Using the application ID from the bot token."
+    );
+  }
+
+  return application.id;
 }
 
 async function configureInteractionsEndpoint(botToken) {
@@ -126,15 +170,6 @@ async function configureInteractionsEndpoint(botToken) {
       targetUrl,
       error: current.error,
       status: current.status
-    };
-  }
-
-  if (current.interactionsEndpointUrl === targetUrl) {
-    return {
-      ok: true,
-      targetUrl,
-      unchanged: true,
-      currentUrl: current.interactionsEndpointUrl
     };
   }
 
@@ -167,16 +202,37 @@ async function configureInteractionsEndpoint(botToken) {
     ok: true,
     targetUrl,
     previousUrl: current.interactionsEndpointUrl,
-    currentUrl: application.interactions_endpoint_url ?? null
+    currentUrl: application.interactions_endpoint_url ?? null,
+    revalidated: current.interactionsEndpointUrl === targetUrl
   };
 }
 
 async function startup() {
   const botToken = env("DISCORD_BOT_TOKEN");
 
+  startupStatus.botIdentity = botToken
+    ? await fetchBotIdentity(botToken)
+    : { ok: false, error: "DISCORD_BOT_TOKEN is not set" };
+
   startupStatus.discordApplication = botToken
     ? await fetchDiscordApplication(botToken)
     : { ok: false, error: "DISCORD_BOT_TOKEN is not set" };
+
+  if (startupStatus.discordApplication.ok) {
+    startupStatus.applicationId = resolveApplicationId(startupStatus.discordApplication);
+    console.log(
+      "Bot:",
+      startupStatus.botIdentity.ok
+        ? `@${startupStatus.botIdentity.username} (${startupStatus.applicationId})`
+        : startupStatus.applicationId
+    );
+  }
+
+  if (startupStatus.botIdentity.ok === false && startupStatus.botIdentity.status === 401) {
+    console.error(
+      "DISCORD_BOT_TOKEN is invalid. If you reset the token after renaming the bot, update it in Northflank and redeploy."
+    );
+  }
 
   startupStatus.interactionsEndpoint = botToken
     ? await configureInteractionsEndpoint(botToken)
@@ -318,10 +374,13 @@ async function handleInteraction(req, res) {
 }
 
 async function sendFollowUp(interaction, data) {
-  const appId = env("DISCORD_APPLICATION_ID");
+  const appId =
+    interaction.application_id ||
+    startupStatus.applicationId ||
+    env("DISCORD_APPLICATION_ID");
 
   if (!appId) {
-    throw new Error("DISCORD_APPLICATION_ID is not set");
+    throw new Error("Application ID is not available");
   }
 
   const response = await fetch(
@@ -365,6 +424,12 @@ app.get("/health", (_, res) => {
       INTERACTIONS_ENDPOINT_URL: Boolean(env("INTERACTIONS_ENDPOINT_URL"))
     },
     discordApplication: startupStatus.discordApplication,
+    botIdentity: startupStatus.botIdentity,
+    applicationId: startupStatus.applicationId,
+    applicationIdMismatch:
+      Boolean(env("DISCORD_APPLICATION_ID")) &&
+      Boolean(startupStatus.applicationId) &&
+      env("DISCORD_APPLICATION_ID") !== startupStatus.applicationId,
     interactionsEndpoint: startupStatus.interactionsEndpoint,
     configuredInteractionsEndpoint: configuredEndpoint,
     interactionStats,
@@ -374,10 +439,10 @@ app.get("/health", (_, res) => {
       getInteractionEndpointUrl() ??
       "https://site--bin-bot-discord--5dyfyjhlp7ws.code.run/interactions",
     notes: [
-      "Slash commands are registered, but Discord must know where to POST interactions.",
-      "Add PUBLIC_URL=https://site--bin-bot-discord--5dyfyjhlp7ws.code.run in Northflank so the bot auto-configures Discord on startup.",
-      "After /binping, interactionStats.total should increase. If it stays 0, Discord is not reaching this server.",
-      "If signatureFailures increases, DISCORD_PUBLIC_KEY is wrong (use Public Key from Developer Portal, not the bot token)."
+      "botIdentity.username shows which bot this deployment is running. It should match the bot in your Discord server.",
+      "If you renamed the bot or reset its token, update DISCORD_BOT_TOKEN in Northflank. If you created a new app, also update DISCORD_PUBLIC_KEY and DISCORD_APPLICATION_ID.",
+      "After /binping, interactionStats.total should increase. If it stays 0, you may be using a different bot in Discord than this deployment.",
+      "If signatureFailures increases, DISCORD_PUBLIC_KEY is wrong for this application."
     ]
   });
 });
@@ -412,16 +477,17 @@ async function putCommands(url, botToken) {
 }
 
 async function registerCommands() {
-  const appId = env("DISCORD_APPLICATION_ID");
   const botToken = env("DISCORD_BOT_TOKEN");
   const guildId = env("DISCORD_GUILD_ID");
+  const appId = startupStatus.applicationId || env("DISCORD_APPLICATION_ID");
 
   startupStatus.inviteUrl = appId
     ? `https://discord.com/oauth2/authorize?client_id=${appId}&scope=bot%20applications.commands&permissions=18432`
     : null;
 
   if (!appId || !botToken) {
-    const message = "Skipping command registration: missing DISCORD_APPLICATION_ID or DISCORD_BOT_TOKEN.";
+    const message =
+      "Skipping command registration: missing application ID or bot token.";
     console.error(message);
     startupStatus.commandRegistration = {
       ok: false,
@@ -551,11 +617,8 @@ async function getBinsEmbed() {
       embeds: [
         {
           title: "🗓️ Upcoming bin collections",
-          description: [
-            formatNextCollection(next),
-            "",
-            formatCollectionsTable(upcoming)
-          ].join("\n"),
+          description: formatNextCollection(next),
+          fields: formatCollectionFields(upcoming),
           color: EMBED_COLOR,
           footer: {
             text: "Leeds City Council (via bins.felixyeung.com)"
@@ -645,25 +708,18 @@ function formatNextCollection(item) {
   return `Next collection: ${binEmoji(item.type)} **${binTypeLabel(item.type)}** on **${formatDate(item.date)}**`;
 }
 
-function formatCollectionsTable(collections) {
-  const lines = [
-    "┏━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━┓",
-    "┃    Bin   ┃   Collection Date       ┃",
-    "┣━━━━━━━━━━╋━━━━━━━━━━━━━━━━━━━━━━━━━┫"
+function formatCollectionFields(collections) {
+  const fields = [
+    { name: "Bin", value: "\u200b", inline: true },
+    { name: "Collection Date", value: "\u200b", inline: true }
   ];
 
-  for (let i = 0; i < collections.length; i++) {
-    const emoji = binEmoji(collections[i].type);
-    const date = formatDate(collections[i].date);
-
-    lines.push(`┃   ${emoji}    ┃  ${date}`);
-
-    if (i < collections.length - 1) {
-      lines.push("┃          ┃                         ┃");
-      lines.push("┃          ┃                         ┃");
-    }
+  for (const item of collections) {
+    fields.push(
+      { name: "\u200b", value: binEmoji(item.type), inline: true },
+      { name: "\u200b", value: formatDate(item.date), inline: true }
+    );
   }
 
-  lines.push("┗━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━┛");
-  return lines.join("\n");
+  return fields;
 }
