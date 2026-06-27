@@ -533,9 +533,9 @@ async function getBinsEmbed() {
       data: {
         embeds: [
           {
-            title: "Bin collections",
+            title: "🗓️ Upcoming bin collections",
             description: "No upcoming collections found.",
-            color: 0xffcc00
+            color: EMBED_COLOR
           }
         ]
       }
@@ -550,14 +550,13 @@ async function getBinsEmbed() {
     data: {
       embeds: [
         {
-          title: "Upcoming bin collections",
-          description: `Next collection: **${next.type}** on **${formatDate(next.date)}**`,
-          color: colourForBin(next.type),
-          fields: upcoming.map(item => ({
-            name: item.type,
-            value: formatDate(item.date),
-            inline: true
-          })),
+          title: "🗓️ Upcoming bin collections",
+          description: [
+            formatNextCollection(next),
+            "",
+            formatCollectionsTable(upcoming)
+          ].join("\n"),
+          color: EMBED_COLOR,
           footer: {
             text: "Leeds City Council (via bins.felixyeung.com)"
           },
@@ -604,22 +603,67 @@ function normaliseBinsResponse(raw) {
 }
 
 function formatDate(value) {
-  return new Intl.DateTimeFormat("en-GB", {
+  const date = new Date(value);
+  const weekday = new Intl.DateTimeFormat("en-GB", {
     weekday: "short",
+    timeZone: "Europe/London"
+  }).format(date);
+  const rest = new Intl.DateTimeFormat("en-GB", {
     day: "numeric",
     month: "short",
     year: "numeric",
     timeZone: "Europe/London"
-  }).format(new Date(value));
+  }).format(date);
+
+  return `${weekday}, ${rest}`;
 }
 
-function colourForBin(type) {
+const EMBED_COLOR = 0x232428;
+
+function binEmoji(type) {
   const t = String(type).toLowerCase();
 
-  if (t.includes("black") || t.includes("general")) return 0x2f3136;
-  if (t.includes("green") || t.includes("garden")) return 0x2ecc71;
-  if (t.includes("brown")) return 0x8b4513;
-  if (t.includes("recycl")) return 0x3498db;
+  if (t.includes("black")) return "<:black_bin:1520236253906472990>";
+  if (t.includes("brown")) return "<:brown_bin:1520236296646164620>";
+  if (t.includes("green")) return "<:green_bin:1520236335510585446>";
 
-  return 0x5865f2;
+  return "🗑️";
+}
+
+function binTypeLabel(type) {
+  const t = String(type).toLowerCase();
+
+  if (t.includes("black") || t.includes("general")) return "BLACK";
+  if (t.includes("brown")) return "BROWN";
+  if (t.includes("green") || t.includes("garden")) return "GREEN";
+  if (t.includes("recycl")) return "RECYCLING";
+
+  return String(type).toUpperCase();
+}
+
+function formatNextCollection(item) {
+  return `Next collection: ${binEmoji(item.type)} **${binTypeLabel(item.type)}** on **${formatDate(item.date)}**`;
+}
+
+function formatCollectionsTable(collections) {
+  const lines = [
+    "┏━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━┓",
+    "┃    Bin   ┃   Collection Date       ┃",
+    "┣━━━━━━━━━━╋━━━━━━━━━━━━━━━━━━━━━━━━━┫"
+  ];
+
+  for (let i = 0; i < collections.length; i++) {
+    const emoji = binEmoji(collections[i].type);
+    const date = formatDate(collections[i].date);
+
+    lines.push(`┃   ${emoji}    ┃  ${date}`);
+
+    if (i < collections.length - 1) {
+      lines.push("┃          ┃                         ┃");
+      lines.push("┃          ┃                         ┃");
+    }
+  }
+
+  lines.push("┗━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━┛");
+  return lines.join("\n");
 }
