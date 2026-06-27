@@ -447,6 +447,83 @@ app.get("/health", (_, res) => {
   });
 });
 
+async function getCommands(url, botToken) {
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `Bot ${botToken}`
+    }
+  });
+
+  const text = await response.text();
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      body: text,
+      commands: []
+    };
+  }
+
+  let commands = [];
+
+  try {
+    commands = JSON.parse(text);
+  } catch {
+    commands = [];
+  }
+
+  return {
+    ok: true,
+    status: response.status,
+    commands: Array.isArray(commands) ? commands : []
+  };
+}
+
+function commandsMatch(existing, desired) {
+  if (existing.length !== desired.length) {
+    return false;
+  }
+
+  const sortByName = (left, right) => left.name.localeCompare(right.name);
+  const current = [...existing].sort(sortByName);
+  const target = [...desired].sort(sortByName);
+
+  return target.every(
+    (command, index) =>
+      current[index].name === command.name &&
+      current[index].description === command.description
+  );
+}
+
+async function syncCommands(url, botToken, label) {
+  const existing = await getCommands(url, botToken);
+
+  if (!existing.ok) {
+    return {
+      ok: false,
+      status: existing.status,
+      body: existing.body,
+      commandNames: []
+    };
+  }
+
+  if (commandsMatch(existing.commands, COMMANDS)) {
+    console.log(`${label} commands unchanged, skipping registration`);
+
+    return {
+      ok: true,
+      skipped: true,
+      status: 200,
+      body: `${label} commands already registered`,
+      commandNames: existing.commands.map(command => command.name)
+    };
+  }
+
+  console.log(`${label} commands changed, updating`);
+  return putCommands(url, botToken);
+}
+
 async function putCommands(url, botToken) {
   const response = await fetch(url, {
     method: "PUT",
@@ -496,38 +573,25 @@ async function registerCommands() {
     return;
   }
 
-  console.log("Registering slash commands");
+  console.log("Checking slash commands");
 
-  const globalResult = await putCommands(
-    `https://discord.com/api/v10/applications/${appId}/commands`,
-    botToken
-  );
-
-  console.log(
-    "Global command registration:",
-    globalResult.status,
-    globalResult.commandNames.join(", ") || globalResult.body
-  );
-
-  const results = {
-    ok: globalResult.ok,
-    global: globalResult
-  };
+  const results = { ok: true };
 
   if (guildId) {
-    const guildResult = await putCommands(
+    const guildResult = await syncCommands(
       `https://discord.com/api/v10/applications/${appId}/guilds/${guildId}/commands`,
-      botToken
+      botToken,
+      "Guild"
     );
 
     console.log(
-      "Guild command registration:",
-      guildResult.status,
+      "Guild commands:",
+      guildResult.skipped ? "unchanged" : guildResult.status,
       guildResult.commandNames.join(", ") || guildResult.body
     );
 
     results.guild = guildResult;
-    results.ok = globalResult.ok && guildResult.ok;
+    results.ok = guildResult.ok;
 
     if (!guildResult.ok) {
       console.error(
@@ -535,13 +599,32 @@ async function registerCommands() {
       );
     }
   } else {
-    console.log(
-      "DISCORD_GUILD_ID not set; only global commands were registered (may take up to 1 hour to appear)."
+    const globalResult = await syncCommands(
+      `https://discord.com/api/v10/applications/${appId}/commands`,
+      botToken,
+      "Global"
     );
-  }
 
-  if (!globalResult.ok) {
-    console.error("Global command registration failed:", globalResult.status, globalResult.body);
+    console.log(
+      "Global commands:",
+      globalResult.skipped ? "unchanged" : globalResult.status,
+      globalResult.commandNames.join(", ") || globalResult.body
+    );
+
+    results.global = globalResult;
+    results.ok = globalResult.ok;
+
+    if (!globalResult.ok) {
+      console.error(
+        "Global command registration failed:",
+        globalResult.status,
+        globalResult.body
+      );
+    }
+
+    console.log(
+      "DISCORD_GUILD_ID not set; registered global commands only (may take up to 1 hour to appear)."
+    );
   }
 
   if (startupStatus.inviteUrl) {
@@ -727,21 +810,16 @@ function formatNextCollection(item) {
 }
 
 function formatCollectionFields(collections) {
-  const fields = [];
-  const rowBreak = { name: "\u200B", value: "\u200B", inline: false };
-
-  for (let i = 0; i < collections.length; i++) {
-    const item = collections[i];
-
-    fields.push(
-      { name: "Bin", value: binEmoji(item.type), inline: true },
-      { name: "Collection", value: formatDateShort(item.date), inline: true }
-    );
-
-    if (i < collections.length - 1) {
-      fields.push(rowBreak);
+  return [
+    {
+      name: "Bin",
+      value: collections.map(item => binEmoji(item.type)).join("\n"),
+      inline: true
+    },
+    {
+      name: "Collection",
+      value: collections.map(item => formatDateShort(item.date)).join("\n"),
+      inline: true
     }
-  }
-
-  return fields;
+  ];
 }

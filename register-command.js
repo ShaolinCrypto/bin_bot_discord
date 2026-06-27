@@ -32,14 +32,14 @@ async function putCommands(label, url) {
   console.log(`${label}:`, response.status, text);
 }
 
-await putCommands(
-  "Global",
-  `https://discord.com/api/v10/applications/${appId}/commands`
-);
-
 if (guildId) {
   await putCommands(
     "Guild",
     `https://discord.com/api/v10/applications/${appId}/guilds/${guildId}/commands`
+  );
+} else {
+  await putCommands(
+    "Global",
+    `https://discord.com/api/v10/applications/${appId}/commands`
   );
 }
