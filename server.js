@@ -20,11 +20,15 @@ const DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE = 5;
 const COMMANDS = [
   {
     name: "bins",
-    description: "Show upcoming Leeds bin collection dates"
+    description: "Show upcoming Leeds bin collection dates",
+    dm_permission: false,
+    contexts: [0]
   },
   {
     name: "binping",
-    description: "Test the Discord interaction endpoint"
+    description: "Test the Discord interaction endpoint",
+    dm_permission: false,
+    contexts: [0]
   }
 ];
 
@@ -318,6 +322,22 @@ async function handleInteraction(req, res) {
       return res.json({ type: DISCORD_PING });
     }
 
+    if (interaction.type === APPLICATION_COMMAND) {
+      const allowedChannelId = env("ALLOWED_CHANNEL_ID");
+
+      if (allowedChannelId && interaction.channel_id !== allowedChannelId) {
+        recordInteraction({ path, result: "wrong_channel" });
+
+        return res.json({
+          type: CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: `This command can only be used in <#${allowedChannelId}>.`,
+            flags: 64
+          }
+        });
+      }
+    }
+
     if (
       interaction.type === APPLICATION_COMMAND &&
       interaction.data?.name === "binping"
@@ -421,7 +441,8 @@ app.get("/health", (_, res) => {
       DISCORD_GUILD_ID: Boolean(env("DISCORD_GUILD_ID")),
       PREMISES_ID: Boolean(env("PREMISES_ID") || env("UPRN")),
       PUBLIC_URL: Boolean(env("PUBLIC_URL")),
-      INTERACTIONS_ENDPOINT_URL: Boolean(env("INTERACTIONS_ENDPOINT_URL"))
+      INTERACTIONS_ENDPOINT_URL: Boolean(env("INTERACTIONS_ENDPOINT_URL")),
+      ALLOWED_CHANNEL_ID: Boolean(env("ALLOWED_CHANNEL_ID"))
     },
     discordApplication: startupStatus.discordApplication,
     botIdentity: startupStatus.botIdentity,
@@ -485,15 +506,26 @@ function commandsMatch(existing, desired) {
     return false;
   }
 
-  const sortByName = (left, right) => left.name.localeCompare(right.name);
-  const current = [...existing].sort(sortByName);
-  const target = [...desired].sort(sortByName);
+  return desired.every(target => {
+    const current = existing.find(command => command.name === target.name);
 
-  return target.every(
-    (command, index) =>
-      current[index].name === command.name &&
-      current[index].description === command.description
-  );
+    if (!current) {
+      return false;
+    }
+
+    if (current.description !== target.description) {
+      return false;
+    }
+
+    if ((current.dm_permission ?? true) !== (target.dm_permission ?? true)) {
+      return false;
+    }
+
+    return (
+      JSON.stringify(current.contexts ?? null) ===
+      JSON.stringify(target.contexts ?? null)
+    );
+  });
 }
 
 async function syncCommands(url, botToken, label) {

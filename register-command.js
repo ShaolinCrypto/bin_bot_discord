@@ -5,11 +5,15 @@ const guildId = process.env.DISCORD_GUILD_ID?.trim();
 const commands = [
   {
     name: "bins",
-    description: "Show upcoming Leeds bin collection dates"
+    description: "Show upcoming Leeds bin collection dates",
+    dm_permission: false,
+    contexts: [0]
   },
   {
     name: "binping",
-    description: "Test the Discord interaction endpoint"
+    description: "Test the Discord interaction endpoint",
+    dm_permission: false,
+    contexts: [0]
   }
 ];
 
