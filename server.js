@@ -15,74 +15,126 @@ const PORT = process.env.PORT || 8080;
 const DISCORD_PING = 1;
 const APPLICATION_COMMAND = 2;
 const CHANNEL_MESSAGE_WITH_SOURCE = 4;
+const DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE = 5;
 
 app.post("/test", (req, res) => {
   console.log("POST /test received");
   res.send("POST test OK");
 });
 
-app.post("/interactions", async (req, res) => {
-  console.log("POST /interactions received");
+async function handleInteraction(req, res) {
+  console.log("Interaction POST received at", req.originalUrl);
 
-  const signature = req.header("x-signature-ed25519");
-  const timestamp = req.header("x-signature-timestamp");
+  try {
+    const signature = req.header("x-signature-ed25519");
+    const timestamp = req.header("x-signature-timestamp");
+    const publicKey = process.env.DISCORD_PUBLIC_KEY;
 
-  if (!signature || !timestamp) {
-    console.log("Missing Discord signature headers");
-    return res.status(401).send("Missing signature headers");
-  }
+    if (!signature || !timestamp) {
+      console.log("Missing Discord signature headers");
+      return res.status(401).send("Missing signature headers");
+    }
 
-  const isVerified = nacl.sign.detached.verify(
-    Buffer.from(timestamp + req.body.toString("utf8")),
-    Buffer.from(signature, "hex"),
-    Buffer.from(process.env.DISCORD_PUBLIC_KEY, "hex")
-  );
+    if (!publicKey) {
+      console.error("DISCORD_PUBLIC_KEY is not set");
+      return res.status(500).send("Server misconfigured");
+    }
 
-  if (!isVerified) {
-    console.log("Signature verification failed");
-    return res.status(401).send("Invalid request signature");
-  }
+    const isVerified = nacl.sign.detached.verify(
+      Buffer.from(timestamp + req.body.toString("utf8")),
+      Buffer.from(signature, "hex"),
+      Buffer.from(publicKey, "hex")
+    );
 
-  console.log("Signature verified");
+    if (!isVerified) {
+      console.log("Signature verification failed");
+      return res.status(401).send("Invalid request signature");
+    }
 
-  const interaction = JSON.parse(req.body.toString("utf8"));
+    console.log("Signature verified");
 
-  if (interaction.type === DISCORD_PING) {
-    return res.json({ type: 1 });
-  }
+    const interaction = JSON.parse(req.body.toString("utf8"));
 
-  if (
-    interaction.type === APPLICATION_COMMAND &&
-    interaction.data?.name === "binping"
-  ) {
-    console.log("binping command received");
+    if (interaction.type === DISCORD_PING) {
+      return res.json({ type: DISCORD_PING });
+    }
+
+    if (
+      interaction.type === APPLICATION_COMMAND &&
+      interaction.data?.name === "binping"
+    ) {
+      console.log("binping command received");
+
+      return res.json({
+        type: CHANNEL_MESSAGE_WITH_SOURCE,
+        data: {
+          content: "Discord interaction received!"
+        }
+      });
+    }
+
+    if (
+      interaction.type === APPLICATION_COMMAND &&
+      interaction.data?.name === "bins"
+    ) {
+      console.log("bins command received");
+
+      res.json({ type: DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE });
+
+      try {
+        const payload = await getBinsEmbed();
+        console.log("bins payload ready");
+        await sendFollowUp(interaction, payload.data);
+      } catch (err) {
+        console.error("bins command failed:", err);
+        await sendFollowUp(interaction, {
+          content: "Something went wrong fetching bin dates. Please try again.",
+          flags: 64
+        });
+      }
+      return;
+    }
 
     return res.json({
       type: CHANNEL_MESSAGE_WITH_SOURCE,
       data: {
-        content: "✅ Discord interaction received!"
+        content: "Unknown command.",
+        flags: 64
       }
     });
-  }
+  } catch (err) {
+    console.error("Interaction handler error:", err);
 
-  if (
-    interaction.type === APPLICATION_COMMAND &&
-    interaction.data?.name === "bins"
-  ) {
-    console.log("Bins command received");
-    const payload = await getBinsEmbed();
-    console.log("Bins payload ready");
-    return res.json(payload);
-  }
-
-  return res.json({
-    type: CHANNEL_MESSAGE_WITH_SOURCE,
-    data: {
-      content: "Unknown command.",
-      flags: 64
+    if (!res.headersSent) {
+      return res.status(500).send("Internal server error");
     }
-  });
-});
+  }
+}
+
+async function sendFollowUp(interaction, data) {
+  const appId = process.env.DISCORD_APPLICATION_ID;
+
+  if (!appId) {
+    throw new Error("DISCORD_APPLICATION_ID is not set");
+  }
+
+  const response = await fetch(
+    `https://discord.com/api/v10/webhooks/${appId}/${interaction.token}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data)
+    }
+  );
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Discord follow-up failed: ${response.status} ${text}`);
+  }
+}
+
+app.post("/", handleInteraction);
+app.post("/interactions", handleInteraction);
 
 app.get("/", (_, res) => {
   res.send("Leeds bins Discord bot is running.");
@@ -143,28 +195,31 @@ registerCommands()
   });
 
 async function getBinsEmbed() {
-  const startDate = new Date().toISOString().slice(0, 10);
-  const endDate = new Date(Date.now() + 180 * 24 * 60 * 60 * 1000)
-    .toISOString()
-    .slice(0, 10);
+  const premisesId = process.env.PREMISES_ID || process.env.UPRN;
 
-  const url =
-    "https://api.leeds.gov.uk/public/waste/v1/BinsDays" +
-    `?uprn=${encodeURIComponent(process.env.UPRN)}` +
-    `&startDate=${startDate}` +
-    `&endDate=${endDate}`;
+  if (!premisesId) {
+    return {
+      type: CHANNEL_MESSAGE_WITH_SOURCE,
+      data: {
+        content: "PREMISES_ID (or UPRN) is not configured on the server.",
+        flags: 64
+      }
+    };
+  }
 
-  console.log("Fetching Leeds bins API");
+  const url = `https://bins.felixyeung.com/api/jobs?premises=${encodeURIComponent(premisesId)}`;
 
-  const response = await fetch(url);
+  console.log("Fetching Leeds bins API for premises", premisesId);
 
-  console.log("Leeds API status:", response.status);
+  const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
+
+  console.log("Leeds bins API status:", response.status);
 
   if (!response.ok) {
     return {
       type: CHANNEL_MESSAGE_WITH_SOURCE,
       data: {
-        content: `Leeds bins API returned ${response.status}.`,
+        content: `Leeds bins API returned ${response.status}. Check PREMISES_ID is valid.`,
         flags: 64
       }
     };
@@ -179,7 +234,7 @@ async function getBinsEmbed() {
       data: {
         embeds: [
           {
-            title: "🗑️ Bin collections",
+            title: "Bin collections",
             description: "No upcoming collections found.",
             color: 0xffcc00
           }
@@ -196,7 +251,7 @@ async function getBinsEmbed() {
     data: {
       embeds: [
         {
-          title: "🗑️ Upcoming bin collections",
+          title: "Upcoming bin collections",
           description: `Next collection: **${next.type}** on **${formatDate(next.date)}**`,
           color: colourForBin(next.type),
           fields: upcoming.map(item => ({
@@ -205,7 +260,7 @@ async function getBinsEmbed() {
             inline: true
           })),
           footer: {
-            text: "Leeds City Council"
+            text: "Leeds City Council (via bins.felixyeung.com)"
           },
           timestamp: new Date().toISOString()
         }
@@ -217,13 +272,15 @@ async function getBinsEmbed() {
 function normaliseBinsResponse(raw) {
   const rows = Array.isArray(raw)
     ? raw
-    : Array.isArray(raw?.data)
-      ? raw.data
-      : Array.isArray(raw?.bins)
-        ? raw.bins
-        : Array.isArray(raw?.binDays)
-          ? raw.binDays
-          : [];
+    : Array.isArray(raw?.data?.jobs)
+      ? raw.data.jobs
+      : Array.isArray(raw?.data)
+        ? raw.data
+        : Array.isArray(raw?.bins)
+          ? raw.bins
+          : Array.isArray(raw?.binDays)
+            ? raw.binDays
+            : [];
 
   return rows
     .map(row => ({
@@ -234,6 +291,7 @@ function normaliseBinsResponse(raw) {
         row.binDay ||
         row.BinDay,
       type:
+        row.bin ||
         row.type ||
         row.binType ||
         row.BinType ||
