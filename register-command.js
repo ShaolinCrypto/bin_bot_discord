@@ -1,19 +1,45 @@
-const APP_ID = process.env.DISCORD_APPLICATION_ID;
-const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
+const appId = process.env.DISCORD_APPLICATION_ID?.trim();
+const botToken = process.env.DISCORD_BOT_TOKEN?.trim();
+const guildId = process.env.DISCORD_GUILD_ID?.trim();
 
-const response = await fetch(
-  `https://discord.com/api/v10/applications/${APP_ID}/commands`,
+const commands = [
   {
-    method: "POST",
+    name: "bins",
+    description: "Show upcoming Leeds bin collection dates"
+  },
+  {
+    name: "binping",
+    description: "Test the Discord interaction endpoint"
+  }
+];
+
+if (!appId || !botToken) {
+  console.error("Set DISCORD_APPLICATION_ID and DISCORD_BOT_TOKEN.");
+  process.exit(1);
+}
+
+async function putCommands(label, url) {
+  const response = await fetch(url, {
+    method: "PUT",
     headers: {
-      Authorization: `Bot ${BOT_TOKEN}`,
+      Authorization: `Bot ${botToken}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({
-      name: "bins",
-      description: "Show upcoming Leeds bin collection dates"
-    })
-  }
+    body: JSON.stringify(commands)
+  });
+
+  const text = await response.text();
+  console.log(`${label}:`, response.status, text);
+}
+
+await putCommands(
+  "Global",
+  `https://discord.com/api/v10/applications/${appId}/commands`
 );
 
-console.log(response.status, await response.text());
+if (guildId) {
+  await putCommands(
+    "Guild",
+    `https://discord.com/api/v10/applications/${appId}/guilds/${guildId}/commands`
+  );
+}

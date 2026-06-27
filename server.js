@@ -17,6 +17,30 @@ const APPLICATION_COMMAND = 2;
 const CHANNEL_MESSAGE_WITH_SOURCE = 4;
 const DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE = 5;
 
+const COMMANDS = [
+  {
+    name: "bins",
+    description: "Show upcoming Leeds bin collection dates"
+  },
+  {
+    name: "binping",
+    description: "Test the Discord interaction endpoint"
+  }
+];
+
+let startupStatus = {
+  startedAt: null,
+  commandRegistration: null,
+  inviteUrl: null
+};
+
+function env(name) {
+  const value = process.env[name];
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
 app.post("/test", (req, res) => {
   console.log("POST /test received");
   res.send("POST test OK");
@@ -28,7 +52,7 @@ async function handleInteraction(req, res) {
   try {
     const signature = req.header("x-signature-ed25519");
     const timestamp = req.header("x-signature-timestamp");
-    const publicKey = process.env.DISCORD_PUBLIC_KEY;
+    const publicKey = env("DISCORD_PUBLIC_KEY");
 
     if (!signature || !timestamp) {
       console.log("Missing Discord signature headers");
@@ -112,7 +136,7 @@ async function handleInteraction(req, res) {
 }
 
 async function sendFollowUp(interaction, data) {
-  const appId = process.env.DISCORD_APPLICATION_ID;
+  const appId = env("DISCORD_APPLICATION_ID");
 
   if (!appId) {
     throw new Error("DISCORD_APPLICATION_ID is not set");
@@ -140,62 +164,146 @@ app.get("/", (_, res) => {
   res.send("Leeds bins Discord bot is running.");
 });
 
-async function registerCommands() {
-  const appId = process.env.DISCORD_APPLICATION_ID;
-  const botToken = process.env.DISCORD_BOT_TOKEN;
-  const guildId = process.env.DISCORD_GUILD_ID;
-
-  if (!appId || !botToken) {
-    console.log("Skipping command registration: missing app ID or bot token.");
-    return;
-  }
-
-  console.log("Registering", guildId ? "guild" : "global", "commands");
-
-  const commands = [
-    {
-      name: "bins",
-      description: "Show upcoming Leeds bin collection dates"
+app.get("/health", (_, res) => {
+  res.json({
+    status: "ok",
+    env: {
+      DISCORD_PUBLIC_KEY: Boolean(env("DISCORD_PUBLIC_KEY")),
+      DISCORD_APPLICATION_ID: Boolean(env("DISCORD_APPLICATION_ID")),
+      DISCORD_BOT_TOKEN: Boolean(env("DISCORD_BOT_TOKEN")),
+      DISCORD_GUILD_ID: Boolean(env("DISCORD_GUILD_ID")),
+      PREMISES_ID: Boolean(env("PREMISES_ID") || env("UPRN"))
     },
-    {
-      name: "binping",
-      description: "Test the Discord interaction endpoint"
-    }
-  ];
+    commandRegistration: startupStatus.commandRegistration,
+    inviteUrl: startupStatus.inviteUrl,
+    notes: [
+      "Set Interactions Endpoint URL in Discord Developer Portal to this service URL (root or /interactions).",
+      "Global slash commands can take up to 1 hour to appear; guild commands are instant when DISCORD_GUILD_ID matches your server.",
+      "Re-invite the bot with applications.commands scope if commands do not appear."
+    ]
+  });
+});
 
-  const url = guildId
-    ? `https://discord.com/api/v10/applications/${appId}/guilds/${guildId}/commands`
-    : `https://discord.com/api/v10/applications/${appId}/commands`;
-
+async function putCommands(url, botToken) {
   const response = await fetch(url, {
     method: "PUT",
     headers: {
       Authorization: `Bot ${botToken}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify(commands)
+    body: JSON.stringify(COMMANDS)
   });
 
   const text = await response.text();
+  let commands = [];
 
-  if (!response.ok) {
-    console.error("Command registration failed:", response.status, text);
+  if (response.ok) {
+    try {
+      commands = JSON.parse(text);
+    } catch {
+      commands = [];
+    }
+  }
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    body: text,
+    commandNames: commands.map(command => command.name)
+  };
+}
+
+async function registerCommands() {
+  const appId = env("DISCORD_APPLICATION_ID");
+  const botToken = env("DISCORD_BOT_TOKEN");
+  const guildId = env("DISCORD_GUILD_ID");
+
+  startupStatus.inviteUrl = appId
+    ? `https://discord.com/oauth2/authorize?client_id=${appId}&scope=bot%20applications.commands&permissions=18432`
+    : null;
+
+  if (!appId || !botToken) {
+    const message = "Skipping command registration: missing DISCORD_APPLICATION_ID or DISCORD_BOT_TOKEN.";
+    console.error(message);
+    startupStatus.commandRegistration = {
+      ok: false,
+      error: message
+    };
     return;
   }
 
-  console.log("Command registration complete:", response.status, text);
+  console.log("Registering slash commands");
+
+  const globalResult = await putCommands(
+    `https://discord.com/api/v10/applications/${appId}/commands`,
+    botToken
+  );
+
+  console.log(
+    "Global command registration:",
+    globalResult.status,
+    globalResult.commandNames.join(", ") || globalResult.body
+  );
+
+  const results = {
+    ok: globalResult.ok,
+    global: globalResult
+  };
+
+  if (guildId) {
+    const guildResult = await putCommands(
+      `https://discord.com/api/v10/applications/${appId}/guilds/${guildId}/commands`,
+      botToken
+    );
+
+    console.log(
+      "Guild command registration:",
+      guildResult.status,
+      guildResult.commandNames.join(", ") || guildResult.body
+    );
+
+    results.guild = guildResult;
+    results.ok = globalResult.ok && guildResult.ok;
+
+    if (!guildResult.ok) {
+      console.error(
+        "Guild command registration failed. Check DISCORD_GUILD_ID matches the server where the bot was invited."
+      );
+    }
+  } else {
+    console.log(
+      "DISCORD_GUILD_ID not set; only global commands were registered (may take up to 1 hour to appear)."
+    );
+  }
+
+  if (!globalResult.ok) {
+    console.error("Global command registration failed:", globalResult.status, globalResult.body);
+  }
+
+  if (startupStatus.inviteUrl) {
+    console.log("Bot invite URL (must include applications.commands):", startupStatus.inviteUrl);
+  }
+
+  startupStatus.commandRegistration = results;
 }
 
 registerCommands()
-  .catch(err => console.error("Command registration crashed:", err))
+  .catch(err => {
+    console.error("Command registration crashed:", err);
+    startupStatus.commandRegistration = {
+      ok: false,
+      error: String(err)
+    };
+  })
   .finally(() => {
+    startupStatus.startedAt = new Date().toISOString();
     app.listen(PORT, () => {
       console.log(`Listening on port ${PORT}`);
     });
   });
 
 async function getBinsEmbed() {
-  const premisesId = process.env.PREMISES_ID || process.env.UPRN;
+  const premisesId = env("PREMISES_ID") || env("UPRN");
 
   if (!premisesId) {
     return {
