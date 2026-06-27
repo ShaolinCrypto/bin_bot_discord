@@ -31,7 +31,23 @@ const COMMANDS = [
 let startupStatus = {
   startedAt: null,
   commandRegistration: null,
-  inviteUrl: null
+  inviteUrl: null,
+  discordApplication: null,
+  interactionsEndpoint: null
+};
+
+const interactionStats = {
+  total: 0,
+  verified: 0,
+  pings: 0,
+  commands: 0,
+  missingHeaders: 0,
+  signatureFailures: 0,
+  errors: 0,
+  lastAt: null,
+  lastPath: null,
+  lastCommand: null,
+  lastResult: null
 };
 
 function env(name) {
@@ -41,13 +57,171 @@ function env(name) {
   return trimmed || undefined;
 }
 
+function getInteractionEndpointUrl() {
+  const explicit = env("INTERACTIONS_ENDPOINT_URL");
+  if (explicit) return explicit.replace(/\/$/, "");
+
+  const publicUrl =
+    env("PUBLIC_URL") || "https://site--bin-bot-discord--5dyfyjhlp7ws.code.run";
+  return `${publicUrl.replace(/\/$/, "")}/interactions`;
+}
+
+function recordInteraction(event) {
+  interactionStats.total += 1;
+  interactionStats.lastAt = new Date().toISOString();
+  interactionStats.lastPath = event.path;
+  interactionStats.lastCommand = event.command ?? null;
+  interactionStats.lastResult = event.result;
+
+  if (event.result === "missing_headers") interactionStats.missingHeaders += 1;
+  if (event.result === "signature_failed") interactionStats.signatureFailures += 1;
+  if (event.result === "verified") interactionStats.verified += 1;
+  if (event.result === "ping") interactionStats.pings += 1;
+  if (event.result === "command") interactionStats.commands += 1;
+  if (event.result === "error") interactionStats.errors += 1;
+}
+
+async function fetchDiscordApplication(botToken) {
+  const response = await fetch("https://discord.com/api/v10/applications/@me", {
+    headers: {
+      Authorization: `Bot ${botToken}`
+    }
+  });
+
+  const text = await response.text();
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      error: text
+    };
+  }
+
+  const application = JSON.parse(text);
+
+  return {
+    ok: true,
+    id: application.id,
+    interactionsEndpointUrl: application.interactions_endpoint_url ?? null
+  };
+}
+
+async function configureInteractionsEndpoint(botToken) {
+  const targetUrl = getInteractionEndpointUrl();
+
+  if (!targetUrl) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: "No interactions endpoint URL could be determined."
+    };
+  }
+
+  const current = await fetchDiscordApplication(botToken);
+
+  if (!current.ok) {
+    return {
+      ok: false,
+      targetUrl,
+      error: current.error,
+      status: current.status
+    };
+  }
+
+  if (current.interactionsEndpointUrl === targetUrl) {
+    return {
+      ok: true,
+      targetUrl,
+      unchanged: true,
+      currentUrl: current.interactionsEndpointUrl
+    };
+  }
+
+  const response = await fetch("https://discord.com/api/v10/applications/@me", {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bot ${botToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      interactions_endpoint_url: targetUrl
+    })
+  });
+
+  const text = await response.text();
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      targetUrl,
+      previousUrl: current.interactionsEndpointUrl,
+      status: response.status,
+      error: text
+    };
+  }
+
+  const application = JSON.parse(text);
+
+  return {
+    ok: true,
+    targetUrl,
+    previousUrl: current.interactionsEndpointUrl,
+    currentUrl: application.interactions_endpoint_url ?? null
+  };
+}
+
+async function startup() {
+  const botToken = env("DISCORD_BOT_TOKEN");
+
+  startupStatus.discordApplication = botToken
+    ? await fetchDiscordApplication(botToken)
+    : { ok: false, error: "DISCORD_BOT_TOKEN is not set" };
+
+  startupStatus.interactionsEndpoint = botToken
+    ? await configureInteractionsEndpoint(botToken)
+    : { ok: false, skipped: true, reason: "DISCORD_BOT_TOKEN is not set" };
+
+  if (startupStatus.interactionsEndpoint.ok) {
+    console.log(
+      "Interactions endpoint:",
+      startupStatus.interactionsEndpoint.currentUrl ??
+        startupStatus.interactionsEndpoint.targetUrl
+    );
+  } else if (!startupStatus.interactionsEndpoint.skipped) {
+    console.error(
+      "Interactions endpoint configuration failed:",
+      startupStatus.interactionsEndpoint.status,
+      startupStatus.interactionsEndpoint.error
+    );
+  } else if (
+    startupStatus.discordApplication.ok &&
+    !startupStatus.discordApplication.interactionsEndpointUrl
+  ) {
+    console.error(
+      "Discord has no Interactions Endpoint URL configured. Set PUBLIC_URL in Northflank or add it manually in the Developer Portal."
+    );
+  }
+
+  try {
+    await registerCommands();
+  } catch (err) {
+    console.error("Command registration crashed:", err);
+    startupStatus.commandRegistration = {
+      ok: false,
+      error: String(err)
+    };
+  }
+}
+
 app.post("/test", (req, res) => {
   console.log("POST /test received");
   res.send("POST test OK");
 });
 
 async function handleInteraction(req, res) {
-  console.log("Interaction POST received at", req.originalUrl);
+  const path = req.originalUrl;
+  console.log("Interaction POST received at", path);
 
   try {
     const signature = req.header("x-signature-ed25519");
@@ -56,11 +230,13 @@ async function handleInteraction(req, res) {
 
     if (!signature || !timestamp) {
       console.log("Missing Discord signature headers");
+      recordInteraction({ path, result: "missing_headers" });
       return res.status(401).send("Missing signature headers");
     }
 
     if (!publicKey) {
       console.error("DISCORD_PUBLIC_KEY is not set");
+      recordInteraction({ path, result: "error" });
       return res.status(500).send("Server misconfigured");
     }
 
@@ -72,14 +248,17 @@ async function handleInteraction(req, res) {
 
     if (!isVerified) {
       console.log("Signature verification failed");
+      recordInteraction({ path, result: "signature_failed" });
       return res.status(401).send("Invalid request signature");
     }
 
     console.log("Signature verified");
+    recordInteraction({ path, result: "verified" });
 
     const interaction = JSON.parse(req.body.toString("utf8"));
 
     if (interaction.type === DISCORD_PING) {
+      recordInteraction({ path, result: "ping" });
       return res.json({ type: DISCORD_PING });
     }
 
@@ -88,6 +267,7 @@ async function handleInteraction(req, res) {
       interaction.data?.name === "binping"
     ) {
       console.log("binping command received");
+      recordInteraction({ path, command: "binping", result: "command" });
 
       return res.json({
         type: CHANNEL_MESSAGE_WITH_SOURCE,
@@ -102,6 +282,7 @@ async function handleInteraction(req, res) {
       interaction.data?.name === "bins"
     ) {
       console.log("bins command received");
+      recordInteraction({ path, command: "bins", result: "command" });
 
       res.json({ type: DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE });
 
@@ -128,6 +309,7 @@ async function handleInteraction(req, res) {
     });
   } catch (err) {
     console.error("Interaction handler error:", err);
+    recordInteraction({ path, result: "error" });
 
     if (!res.headersSent) {
       return res.status(500).send("Internal server error");
@@ -165,6 +347,12 @@ app.get("/", (_, res) => {
 });
 
 app.get("/health", (_, res) => {
+  const configuredEndpoint =
+    startupStatus.interactionsEndpoint?.currentUrl ??
+    startupStatus.interactionsEndpoint?.targetUrl ??
+    startupStatus.discordApplication?.interactionsEndpointUrl ??
+    null;
+
   res.json({
     status: "ok",
     env: {
@@ -172,14 +360,24 @@ app.get("/health", (_, res) => {
       DISCORD_APPLICATION_ID: Boolean(env("DISCORD_APPLICATION_ID")),
       DISCORD_BOT_TOKEN: Boolean(env("DISCORD_BOT_TOKEN")),
       DISCORD_GUILD_ID: Boolean(env("DISCORD_GUILD_ID")),
-      PREMISES_ID: Boolean(env("PREMISES_ID") || env("UPRN"))
+      PREMISES_ID: Boolean(env("PREMISES_ID") || env("UPRN")),
+      PUBLIC_URL: Boolean(env("PUBLIC_URL")),
+      INTERACTIONS_ENDPOINT_URL: Boolean(env("INTERACTIONS_ENDPOINT_URL"))
     },
+    discordApplication: startupStatus.discordApplication,
+    interactionsEndpoint: startupStatus.interactionsEndpoint,
+    configuredInteractionsEndpoint: configuredEndpoint,
+    interactionStats,
     commandRegistration: startupStatus.commandRegistration,
     inviteUrl: startupStatus.inviteUrl,
+    recommendedInteractionsEndpoint:
+      getInteractionEndpointUrl() ??
+      "https://site--bin-bot-discord--5dyfyjhlp7ws.code.run/interactions",
     notes: [
-      "Set Interactions Endpoint URL in Discord Developer Portal to this service URL (root or /interactions).",
-      "Global slash commands can take up to 1 hour to appear; guild commands are instant when DISCORD_GUILD_ID matches your server.",
-      "Re-invite the bot with applications.commands scope if commands do not appear."
+      "Slash commands are registered, but Discord must know where to POST interactions.",
+      "Add PUBLIC_URL=https://site--bin-bot-discord--5dyfyjhlp7ws.code.run in Northflank so the bot auto-configures Discord on startup.",
+      "After /binping, interactionStats.total should increase. If it stays 0, Discord is not reaching this server.",
+      "If signatureFailures increases, DISCORD_PUBLIC_KEY is wrong (use Public Key from Developer Portal, not the bot token)."
     ]
   });
 });
@@ -287,20 +485,13 @@ async function registerCommands() {
   startupStatus.commandRegistration = results;
 }
 
-registerCommands()
-  .catch(err => {
-    console.error("Command registration crashed:", err);
-    startupStatus.commandRegistration = {
-      ok: false,
-      error: String(err)
-    };
-  })
-  .finally(() => {
-    startupStatus.startedAt = new Date().toISOString();
-    app.listen(PORT, () => {
-      console.log(`Listening on port ${PORT}`);
-    });
+startupStatus.startedAt = new Date().toISOString();
+app.listen(PORT, () => {
+  console.log(`Listening on port ${PORT}`);
+  startup().catch(err => {
+    console.error("Startup failed:", err);
   });
+});
 
 async function getBinsEmbed() {
   const premisesId = env("PREMISES_ID") || env("UPRN");
