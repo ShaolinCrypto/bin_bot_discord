@@ -39,7 +39,8 @@ let startupStatus = {
   discordApplication: null,
   botIdentity: null,
   applicationId: null,
-  interactionsEndpoint: null
+  interactionsEndpoint: null,
+  guildCommandPermissions: null
 };
 
 const interactionStats = {
@@ -322,22 +323,6 @@ async function handleInteraction(req, res) {
       return res.json({ type: DISCORD_PING });
     }
 
-    if (interaction.type === APPLICATION_COMMAND) {
-      const allowedChannelId = env("ALLOWED_CHANNEL_ID");
-
-      if (allowedChannelId && interaction.channel_id !== allowedChannelId) {
-        recordInteraction({ path, result: "wrong_channel" });
-
-        return res.json({
-          type: CHANNEL_MESSAGE_WITH_SOURCE,
-          data: {
-            content: `This command can only be used in <#${allowedChannelId}>.`,
-            flags: 64
-          }
-        });
-      }
-    }
-
     if (
       interaction.type === APPLICATION_COMMAND &&
       interaction.data?.name === "binping"
@@ -441,8 +426,7 @@ app.get("/health", (_, res) => {
       DISCORD_GUILD_ID: Boolean(env("DISCORD_GUILD_ID")),
       PREMISES_ID: Boolean(env("PREMISES_ID") || env("UPRN")),
       PUBLIC_URL: Boolean(env("PUBLIC_URL")),
-      INTERACTIONS_ENDPOINT_URL: Boolean(env("INTERACTIONS_ENDPOINT_URL")),
-      ALLOWED_CHANNEL_ID: Boolean(env("ALLOWED_CHANNEL_ID"))
+      INTERACTIONS_ENDPOINT_URL: Boolean(env("INTERACTIONS_ENDPOINT_URL"))
     },
     discordApplication: startupStatus.discordApplication,
     botIdentity: startupStatus.botIdentity,
@@ -455,15 +439,16 @@ app.get("/health", (_, res) => {
     configuredInteractionsEndpoint: configuredEndpoint,
     interactionStats,
     commandRegistration: startupStatus.commandRegistration,
+    guildCommandPermissions: startupStatus.guildCommandPermissions,
     inviteUrl: startupStatus.inviteUrl,
     recommendedInteractionsEndpoint:
       getInteractionEndpointUrl() ??
       "https://site--bin-bot-discord--5dyfyjhlp7ws.code.run/interactions",
     notes: [
-      "botIdentity.username shows which bot this deployment is running. It should match the bot in your Discord server.",
-      "If you renamed the bot or reset its token, update DISCORD_BOT_TOKEN in Northflank. If you created a new app, also update DISCORD_PUBLIC_KEY and DISCORD_APPLICATION_ID.",
-      "After /binping, interactionStats.total should increase. If it stays 0, you may be using a different bot in Discord than this deployment.",
-      "If signatureFailures increases, DISCORD_PUBLIC_KEY is wrong for this application."
+      "Channel access is controlled in Discord: Server Settings → Integrations → Count Binface → command permissions.",
+      "Guild command permissions from Discord are shown in guildCommandPermissions (read-only).",
+      "Re-registering commands with changed definitions creates new command IDs and resets integration permissions — configure channels again after deploy if that happens.",
+      "Server admins can bypass integration command restrictions when testing."
     ]
   });
 });
@@ -548,12 +533,18 @@ async function syncCommands(url, botToken, label) {
       skipped: true,
       status: 200,
       body: `${label} commands already registered`,
-      commandNames: existing.commands.map(command => command.name)
+      commandNames: existing.commands.map(command => command.name),
+      commands: existing.commands
     };
   }
 
   console.log(`${label} commands changed, updating`);
-  return putCommands(url, botToken);
+  const result = await putCommands(url, botToken);
+
+  return {
+    ...result,
+    commands: result.commands ?? []
+  };
 }
 
 async function putCommands(url, botToken) {
@@ -581,7 +572,48 @@ async function putCommands(url, botToken) {
     ok: response.ok,
     status: response.status,
     body: text,
-    commandNames: commands.map(command => command.name)
+    commandNames: commands.map(command => command.name),
+    commands
+  };
+}
+
+async function fetchGuildCommandPermissions(appId, guildId, botToken) {
+  const response = await fetch(
+    `https://discord.com/api/v10/applications/${appId}/guilds/${guildId}/commands/permissions`,
+    {
+      headers: {
+        Authorization: `Bot ${botToken}`
+      }
+    }
+  );
+
+  const text = await response.text();
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      error: text
+    };
+  }
+
+  let permissions = [];
+
+  try {
+    const parsed = JSON.parse(text);
+    permissions = Array.isArray(parsed.permissions) ? parsed.permissions : [];
+  } catch {
+    permissions = [];
+  }
+
+  return {
+    ok: true,
+    permissions: permissions.map(permission => ({
+      commandId: permission.application_command_id,
+      targetId: permission.id,
+      type: permission.type === 3 ? "channel" : permission.type === 1 ? "role" : "other",
+      allowed: permission.permission
+    }))
   };
 }
 
@@ -629,6 +661,13 @@ async function registerCommands() {
       console.error(
         "Guild command registration failed. Check DISCORD_GUILD_ID matches the server where the bot was invited."
       );
+    } else {
+      startupStatus.guildCommandPermissions = await fetchGuildCommandPermissions(
+        appId,
+        guildId,
+        botToken
+      );
+      results.guildCommandPermissions = startupStatus.guildCommandPermissions;
     }
   } else {
     const globalResult = await syncCommands(
