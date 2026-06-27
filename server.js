@@ -665,6 +665,24 @@ function normaliseBinsResponse(raw) {
     .sort((a, b) => new Date(a.date) - new Date(b.date));
 }
 
+function formatDateShort(value) {
+  const date = new Date(value);
+  const weekday = new Intl.DateTimeFormat("en-GB", {
+    weekday: "short",
+    timeZone: "Europe/London"
+  }).format(date);
+  const day = new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    timeZone: "Europe/London"
+  }).format(date);
+  const month = new Intl.DateTimeFormat("en-GB", {
+    month: "short",
+    timeZone: "Europe/London"
+  }).format(date);
+
+  return `${weekday}, ${day} ${month}`;
+}
+
 function formatDate(value) {
   const date = new Date(value);
   const weekday = new Intl.DateTimeFormat("en-GB", {
@@ -709,16 +727,20 @@ function formatNextCollection(item) {
 }
 
 function formatCollectionFields(collections) {
-  const fields = [
-    { name: "Bin", value: "\u200b", inline: true },
-    { name: "Collection Date", value: "\u200b", inline: true }
-  ];
+  const fields = [];
+  const rowBreak = { name: "\u200B", value: "\u200B", inline: false };
 
-  for (const item of collections) {
+  for (let i = 0; i < collections.length; i++) {
+    const item = collections[i];
+
     fields.push(
-      { name: "\u200b", value: binEmoji(item.type), inline: true },
-      { name: "\u200b", value: formatDate(item.date), inline: true }
+      { name: "Bin", value: binEmoji(item.type), inline: true },
+      { name: "Collection", value: formatDateShort(item.date), inline: true }
     );
+
+    if (i < collections.length - 1) {
+      fields.push(rowBreak);
+    }
   }
 
   return fields;
